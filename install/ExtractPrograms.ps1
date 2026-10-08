@@ -1,3 +1,25 @@
+param (
+    [string]$OutputFile = ""
+)
+
+# Collect bash-array lines so they can be written as UTF-8 (no BOM) when -OutputFile is set.
+# cmd.exe redirection of Write-Output uses the Windows ANSI code page (e.g. GBK), which
+# corrupts non-ASCII application names in Linux .desktop files.
+$script:BashLines = New-Object System.Collections.Generic.List[string]
+
+function Emit-BashLine {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Line
+    )
+
+    if ($OutputFile) {
+        $script:BashLines.Add($Line)
+    } else {
+        Write-Output $Line
+    }
+}
+
 ### FUNCTIONS ###
 # Name: 'GetApplicationIcon'
 # Role: Extract the icon from a given executable file as a base-64 string.
@@ -88,9 +110,9 @@ function PrintArrayData {
         $Icon = GetApplicationIcon -exePath $Application.Path
 
         # Output the results as bash commands that append the results to several bash arrays.
-        Write-Output ('NAMES+=("' + $Application.Name + '")')
-        Write-Output ('EXES+=("' + $Application.Path + '")')
-        Write-Output ('ICONS+=("' + $Icon + '")')
+        Emit-BashLine ('NAMES+=("' + $Application.Name + '")')
+        Emit-BashLine ('EXES+=("' + $Application.Path + '")')
+        Emit-BashLine ('ICONS+=("' + $Icon + '")')
     }
 }
 
@@ -323,9 +345,9 @@ function AppSearchScoop {
 
 ### SEQUENTIAL LOGIC ###
 # Print bash commands to define three new arrays.
-Write-Output 'NAMES=()'
-Write-Output 'EXES=()'
-Write-Output 'ICONS=()'
+Emit-BashLine 'NAMES=()'
+Emit-BashLine 'EXES=()'
+Emit-BashLine 'ICONS=()'
 
 # Search for installed applications.
 AppSearchWinReg     # Windows Registry
@@ -334,3 +356,9 @@ if (Get-Command Get-AppxPackage -ErrorAction SilentlyContinue){
 }
 AppSearchChocolatey # Chocolatey Package Manager
 AppSearchScoop      # Scoop Package Manager
+
+# When -OutputFile is set, write UTF-8 without BOM so Linux can source the file correctly.
+if ($OutputFile) {
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllLines($OutputFile, $script:BashLines.ToArray(), $utf8NoBom)
+}

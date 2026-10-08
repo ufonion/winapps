@@ -154,6 +154,22 @@ function waGetSourceCode() {
     # Determine the absolute path to the directory containing the script.
     SCRIPT_DIR_PATH=$(readlink -f "$(dirname "${BASH_SOURCE[0]}")")
 
+    # Prefer the checkout that launched this script when it is a full WinApps tree.
+    # Otherwise local fixes are discarded after switching to $SOURCE_PATH (winapps-src),
+    # e.g. encoding fixes in install/ExtractPrograms.ps1 never reach the Windows scan.
+    if [[ -f "$SCRIPT_DIR_PATH/setup.sh" && -f "$SCRIPT_DIR_PATH/install/ExtractPrograms.ps1" && -d "$SCRIPT_DIR_PATH/apps" && -d "$SCRIPT_DIR_PATH/bin" ]]; then
+        if [[ "$SCRIPT_DIR_PATH" != "$(readlink -f "$SOURCE_PATH" 2>/dev/null || true)" ]]; then
+            echo -e "${INFO_TEXT}Using local WinApps source at ${CLEAR_TEXT}${COMMAND_TEXT}${SCRIPT_DIR_PATH}${CLEAR_TEXT}${INFO_TEXT}.${CLEAR_TEXT}"
+        fi
+        SOURCE_PATH="$SCRIPT_DIR_PATH"
+        if ! cd "$SOURCE_PATH" &>/dev/null; then
+            echo -e "${ERROR_TEXT}ERROR:${CLEAR_TEXT} ${BOLD_TEXT}DIRECTORY CHANGE FAILURE.${CLEAR_TEXT}"
+            echo -e "${INFO_TEXT}Failed to change the working directory to ${CLEAR_TEXT}${COMMAND_TEXT}${SOURCE_PATH}${CLEAR_TEXT}${INFO_TEXT}.${CLEAR_TEXT}"
+            return "$EC_FAILED_CD"
+        fi
+        return 0
+    fi
+
     # Check if winapps is currently installed on $SOURCE_PATH
     if [[ -f "$SCRIPT_DIR_PATH/winapps" && "$SCRIPT_DIR_PATH" != "$SOURCE_PATH" ]]; then
         # Display a warning.
@@ -1270,8 +1286,10 @@ function waFindInstalled() {
     done
 
     # Append a command to the batch script to run the PowerShell script and store its output in the 'detected' file.
+    # Write via -OutputFile as UTF-8 (no BOM). cmd.exe '>' redirection uses the Windows ANSI
+    # code page (e.g. GBK on zh-CN), which corrupts non-ASCII names in Linux .desktop files.
     # shellcheck disable=SC2129 # Silence warning regarding repeated redirects.
-    echo "powershell.exe -ExecutionPolicy Bypass -File ${PS_SCRIPT_HOME_PATH_WIN} > ${DETECTED_FILE_PATH_WIN}" >>"$BATCH_SCRIPT_PATH"
+    echo "powershell.exe -ExecutionPolicy Bypass -File ${PS_SCRIPT_HOME_PATH_WIN} -OutputFile ${DETECTED_FILE_PATH_WIN}" >>"$BATCH_SCRIPT_PATH"
 
     # Append a command to the batch script to rename the temporary file containing the names of all detected officially supported applications.
     echo "RENAME ${TMP_INST_FILE_PATH_WIN} installed" >>"$BATCH_SCRIPT_PATH"
@@ -1589,6 +1607,49 @@ function waConfigureApps() {
     fi
 }
 
+# Name: 'waNormalizeDetectedUtf8'
+# Role: Ensure the 'detected' file is valid UTF-8 before bash sources it.
+#       Strips a UTF-8 BOM if present. If the file is not valid UTF-8 (e.g. legacy
+#       GBK output from cmd.exe redirection), convert from common Windows code pages.
+function waNormalizeDetectedUtf8() {
+    local DETECTED_PATH="$1"
+
+    if [ ! -f "$DETECTED_PATH" ]; then
+        return 0
+    fi
+
+    python3 - "$DETECTED_PATH" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = path.read_bytes()
+
+# Strip UTF-8 BOM if present.
+if data.startswith(b"\xef\xbb\xbf"):
+    data = data[3:]
+    path.write_bytes(data)
+
+try:
+    data.decode("utf-8")
+    sys.exit(0)
+except UnicodeDecodeError:
+    pass
+
+for encoding in ("gbk", "gb18030", "cp950", "cp932", "cp949", "cp1252"):
+    try:
+        text = data.decode(encoding)
+    except UnicodeDecodeError:
+        continue
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(text)
+    sys.exit(0)
+
+sys.stderr.write(f"WARNING: Could not convert '{path}' to UTF-8; leaving as-is.\n")
+sys.exit(0)
+PY
+}
+
 # Name: 'waConfigureDetectedApps'
 # Role: Allow the user to select which detected applications to configure.
 function waConfigureDetectedApps() {
@@ -1608,6 +1669,9 @@ function waConfigureDetectedApps() {
         # On WINDOWS systems, lines are terminated with both a carriage return (\r) and a newline (\n) character.
         # Remove all carriage returns (\r) within the 'detected' file, as the file was written by Windows.
         sed -i 's/\r//g' "$DETECTED_FILE_PATH"
+
+        # Ensure UTF-8 so non-ASCII application names survive into .desktop files.
+        waNormalizeDetectedUtf8 "$DETECTED_FILE_PATH"
 
         # Import the detected application information:
         # - Application Names               (NAMES)
